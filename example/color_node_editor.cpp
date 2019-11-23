@@ -664,6 +664,8 @@ public:
             imnodes::Link(iter->first, iter->second.from, iter->second.to);
         }
 
+        imnodes::EndNodeEditor();
+
         const bool open_popup =
             ImGui::IsMouseClicked(1) || ImGui::IsKeyReleased(SDL_SCANCODE_A);
 
@@ -777,28 +779,40 @@ public:
             }
             ImGui::EndPopup();
         }
+
         ImGui::PopStyleVar();
 
-        imnodes::EndNodeEditor();
-
-        Id link_selected;
-        if (imnodes::IsLinkSelected(&link_selected.id))
         {
-            if (ImGui::IsKeyReleased(SDL_SCANCODE_X))
+            const int num_selected = imnodes::NumSelectedLinks();
+            if (num_selected > 0 && ImGui::IsKeyReleased(SDL_SCANCODE_X))
             {
-                Node& node = graph_.node(graph_.edge(link_selected).from);
-                assert(node.type == Node_NumberExpression);
-                node.type = Node_Number;
-                graph_.erase_edge(size_t(link_selected));
+                static std::vector<int> selected_links;
+                selected_links.resize(static_cast<size_t>(num_selected), -1);
+                imnodes::GetSelectedLinks(selected_links.data());
+                for (const int link_id : selected_links)
+                {
+                    assert(link_id >= 0);
+                    Node& node = graph_.node(graph_.edge(link_id).from);
+                    assert(node.type == Node_NumberExpression);
+                    node.type = Node_Number;
+                    graph_.erase_edge(size_t(link_id));
+                }
+                selected_links.clear();
             }
         }
 
-        Id node_selected;
-        if (imnodes::IsNodeSelected(&node_selected.id))
         {
-            if (ImGui::IsKeyReleased(SDL_SCANCODE_X))
+            const int num_selected = imnodes::NumSelectedNodes();
+            if (num_selected > 0 && ImGui::IsKeyReleased(SDL_SCANCODE_X))
             {
-                find_and_remove_node(node_selected);
+                static std::vector<int> selected_nodes;
+                selected_nodes.resize(static_cast<size_t>(num_selected), -1);
+                imnodes::GetSelectedNodes(selected_nodes.data());
+                for (const int node_id : selected_nodes)
+                {
+                    find_and_remove_node(node_id);
+                }
+                selected_nodes.clear();
             }
         }
 
@@ -905,6 +919,8 @@ private:
     inline void find_and_remove_node(const int id)
     {
         // this function is a spectacular feat of engineering...
+
+        assert(id >= 0);
 
         if (remove_output_node(id))
             return;
