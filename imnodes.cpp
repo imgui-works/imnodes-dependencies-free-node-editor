@@ -238,6 +238,23 @@ struct BoxSelector
     BoxSelector() : state(BoxSelectorState_None), box_rect() {}
 };
 
+enum NodeInteractionState
+{
+    NodeInteractionState_MouseDown,
+    NodeInteractionState_None
+};
+
+struct NodeInteraction
+{
+    NodeInteractionState state;
+    int node_idx;
+
+    NodeInteraction()
+        : state(NodeInteractionState_None), node_idx(INVALID_INDEX)
+    {
+    }
+};
+
 struct ColorStyleElement
 {
     ImU32 color;
@@ -252,7 +269,8 @@ struct
 {
     EditorContext* default_editor_ctx;
     EditorContext* editor_ctx;
-    ImVec2 grid_origin;
+    ImVec2 canvas_origin_screen_space;
+    ImRect canvas_rect_screen_space;
     ScopeFlags current_scope;
 
     Style style;
@@ -275,12 +293,6 @@ struct
         int index;
         int attribute;
     } node_active;
-
-    struct
-    {
-        int index;
-        ImVec2 position;
-    } node_moved;
 
     int node_hovered;
     int link_hovered;
@@ -548,10 +560,10 @@ inline bool rectangle_overlaps_link(
 
     if (rectangle.Overlaps(lrect))
     {
-        // First, check if both endpoints of the curve are trivially contained
+        // First, check if either one or both endpoinds are trivially contained
         // in the rectangle
 
-        if (rectangle.Contains(start) && rectangle.Contains(end))
+        if (rectangle.Contains(start) || rectangle.Contains(end))
         {
             return true;
         }
@@ -585,6 +597,7 @@ struct EditorContext
 
     LinkData link_dragged;
     BoxSelector box_selector;
+    NodeInteraction node_interaction;
 
     EditorContext()
         : nodes(), pins(), links(), panning(0.f, 0.f), grid_draw_list(nullptr),
@@ -731,12 +744,62 @@ void box_selector_update(
     }
 }
 
+void node_interaction_begin(EditorContext& editor, const int node_idx)
+{
+    NodeInteraction& node_interaction = editor.node_interaction;
+    node_interaction.state = NodeInteractionState_MouseDown;
+    node_interaction.node_idx = node_idx;
+    // If the node is not already contained in the selection, then we want only
+    // the interaction node to be selected, effective immediately.
+    //
+    // Otherwise, we want to allow for the possibility of multiple nodes to be
+    // moved at once.
+    if (!editor.selected_nodes.contains(node_idx))
+    {
+        editor.selected_nodes.clear();
+        editor.selected_nodes.push_back(node_idx);
+    }
+}
+
+void node_interaction_update(EditorContext& editor)
+{
+    NodeInteraction& node_interaction = editor.node_interaction;
+    switch (node_interaction.state)
+    {
+        case NodeInteractionState_MouseDown:
+        {
+            assert(node_interaction.node_idx != INVALID_INDEX);
+            if (ImGui::IsMouseDragging(0) &&
+                editor.link_dragged.start_attr == INVALID_INDEX)
+            {
+                for (int i = 0; i < editor.selected_nodes.size(); ++i)
+                {
+                    const int idx = editor.selected_nodes[i];
+                    NodeData& node = editor.nodes.pool[idx];
+                    node.origin += ImGui::GetIO().MouseDelta;
+                }
+            }
+
+            if (ImGui::IsMouseReleased(0))
+            {
+                node_interaction.state = NodeInteractionState_None;
+            }
+        }
+        break;
+        case NodeInteractionState_None:
+            break;
+        default:
+            assert(!"Unreachable code!");
+            break;
+    }
+}
+
 // [SECTION] render helpers
 
 inline ImVec2 screen_space_to_grid_space(const ImVec2& v)
 {
     const EditorContext& editor = editor_context_get();
-    return v - g.grid_origin - editor.panning;
+    return v - g.canvas_origin_screen_space - editor.panning;
 }
 
 inline ImVec2 grid_space_to_editor_space(const ImVec2& v)
@@ -748,12 +811,12 @@ inline ImVec2 grid_space_to_editor_space(const ImVec2& v)
 inline ImVec2 grid_space_to_screen_space(const ImVec2& v)
 {
     const EditorContext& editor = editor_context_get();
-    return v + g.grid_origin + editor.panning;
+    return v + g.canvas_origin_screen_space + editor.panning;
 }
 
 inline ImVec2 editor_space_to_screen_space(const ImVec2& v)
 {
-    return g.grid_origin + v;
+    return g.canvas_origin_screen_space + v;
 }
 
 inline ImRect get_item_rect()
@@ -809,10 +872,10 @@ inline ImRect get_screen_space_node_rect(
     return rect;
 }
 
-void draw_grid(const EditorContext& editor)
+void draw_grid(EditorContext& editor, const ImVec2& canvas_size)
 {
     const ImVec2 offset = editor.panning;
-    const ImVec2 canvas_size = ImGui::GetWindowSize();
+
     for (float x = fmodf(offset.x, GRID_SIZE); x < canvas_size.x;
          x += GRID_SIZE)
     {
@@ -821,6 +884,7 @@ void draw_grid(const EditorContext& editor)
             editor_space_to_screen_space(ImVec2(x, canvas_size.y)),
             g.style.colors[ColorStyle_GridLine]);
     }
+
     for (float y = fmodf(offset.y, GRID_SIZE); y < canvas_size.y;
          y += GRID_SIZE)
     {
@@ -870,17 +934,8 @@ void draw_node(EditorContext& editor, int node_idx)
         g.node_hovered = node_idx;
         if (ImGui::IsMouseClicked(0))
         {
-            editor.selected_nodes.push_back(g.node_hovered);
+            node_interaction_begin(editor, node_idx);
         }
-    }
-
-    // Check to see whether the node moved during the frame. The node's position
-    // is updated after the node has been drawn (because the user has already
-    // rendered the UI!).
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0))
-    {
-        g.node_moved.index = node_idx;
-        g.node_moved.position = node.origin + ImGui::GetIO().MouseDelta;
     }
 
     ImU32 node_background = node.color_style.background;
@@ -1021,6 +1076,12 @@ void EditorContextFree(EditorContext* ctx)
 
 void EditorContextSet(EditorContext* ctx) { g.editor_ctx = ctx; }
 
+void EditorContextResetPanning(const ImVec2& pos)
+{
+    EditorContext& editor = editor_context_get();
+    editor.panning = pos;
+}
+
 void Initialize()
 {
     assert(initialized == false);
@@ -1028,7 +1089,8 @@ void Initialize()
 
     g.default_editor_ctx = NULL;
     g.editor_ctx = NULL;
-    g.grid_origin = ImVec2(0.0f, 0.0f);
+    g.canvas_origin_screen_space = ImVec2(0.0f, 0.0f);
+    g.canvas_rect_screen_space = ImRect(ImVec2(0.f, 0.f), ImVec2(0.f, 0.f));
     g.current_scope = Scope_None;
 
     g.default_editor_ctx = EditorContextCreate();
@@ -1142,8 +1204,6 @@ void BeginNodeEditor()
     g.link_created = LinkData();
     g.node_active.index = INVALID_INDEX;
     g.node_active.attribute = INVALID_INDEX;
-    g.node_moved.index = INVALID_INDEX;
-    g.node_moved.position = ImVec2(0.0f, 0.0f);
     g.node_hovered = INVALID_INDEX;
     g.link_hovered = INVALID_INDEX;
     g.pin_hovered = INVALID_INDEX;
@@ -1168,7 +1228,7 @@ void BeginNodeEditor()
             ImVec2(0.f, 0.f),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
-        g.grid_origin = ImGui::GetCursorScreenPos();
+        g.canvas_origin_screen_space = ImGui::GetCursorScreenPos();
         // prepare for layering the node content on top of the nodes
         // NOTE: the draw list has to be captured here, because we want all the
         // content to clip the scrolling_region child window.
@@ -1176,10 +1236,16 @@ void BeginNodeEditor()
         editor.grid_draw_list->ChannelsSplit(Channel_Count);
         editor.grid_draw_list->ChannelsSetCurrent(Channel_Background);
 
-        // TODO: showing the grid should be a setting
-        if (/*show_grid*/ true)
         {
-            draw_grid(editor);
+            const ImVec2 canvas_size = ImGui::GetWindowSize();
+            g.canvas_rect_screen_space = ImRect(
+                editor_space_to_screen_space(ImVec2(0.f, 0.f)),
+                editor_space_to_screen_space(canvas_size));
+            // TODO: showing the grid should be a setting
+            if (/*show_grid*/ true)
+            {
+                draw_grid(editor, canvas_size);
+            }
         }
     }
 
@@ -1303,21 +1369,17 @@ void EndNodeEditor()
         }
     }
 
-    if (g.node_moved.index != INVALID_INDEX &&
-        editor.link_dragged.start_attr == INVALID_INDEX)
-    {
-        // Don't move the node if we're dragging a link
-        editor.nodes.pool[g.node_moved.index].origin = g.node_moved.position;
-    }
-
     {
         const bool any_ui_element_hovered = (g.node_hovered != INVALID_INDEX) ||
                                             (g.link_hovered != INVALID_INDEX) ||
                                             (g.pin_hovered != INVALID_INDEX) ||
                                             ImGui::IsAnyItemHovered();
+        const bool is_mouse_clicked_in_canvas =
+            is_mouse_clicked &&
+            g.canvas_rect_screen_space.Contains(ImGui::GetMousePos());
 
         // start the box selector
-        if (!any_ui_element_hovered && is_mouse_clicked)
+        if (!any_ui_element_hovered && is_mouse_clicked_in_canvas)
         {
             box_selector_begin(editor.box_selector);
         }
@@ -1328,6 +1390,8 @@ void EndNodeEditor()
             box_selector_update(editor.box_selector, editor, imgui_io);
         }
     }
+
+    node_interaction_update(editor);
 
     // set channel 0 before merging, or else UI rendering is broken
     editor.grid_draw_list->ChannelsSetCurrent(0);
